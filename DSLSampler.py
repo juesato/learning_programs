@@ -3,6 +3,7 @@ import random
 import json
 import subprocess
 import pickle
+import copy
 
 
 def get_postcondition(prog_str, precondition):
@@ -74,8 +75,8 @@ class ProgramSampler:
 
     def sample_io(self, start_symbols, prog_str):
         precondition = self._sample_inputs(start_symbols)
-        postcondition = get_postcondition(prog_str, precondition)
-        print postcondition
+        state = copy.deepcopy(precondition)
+        postcondition = get_postcondition(prog_str, state)
         return {'precondition': precondition,
                 'postcondition': postcondition}
 
@@ -91,20 +92,33 @@ class DatasetWriter:
             file_path = os.path.join(data_dir, 'len' + str(i) + '.json')
             with open(file_path, 'w') as out_file:
                 out_file.write('[\n')
-                for j in xrange(num_progs):
+                prog_count = 0
+                while prog_count < num_progs:
                     start_symbols = self._sample_start_symbols()
-                    prog = self.prog_sampler.sample_program(i, start_symbols)
+                    prog = self.prog_sampler.sample_program(
+                        i, copy.deepcopy(start_symbols))
                     io_examples = []
+                    io_generation_count = 0
+                    # Some programs often have / by 0 errors
+                    bad_program = False
                     while len(io_examples) < num_samples_per_prog:
+                        io_generation_count += 1
+                        if io_generation_count > num_samples_per_prog * 2:
+                            bad_program = True
+                            break
                         try:
                             sample_io = self.prog_sampler.sample_io(
                                 start_symbols, prog)
                         except Exception as e:
                             # Probably hit an error due to divide by 0
-                            print e
+                            # print e
                             continue
                         io_examples.append(sample_io)
 
+                    if bad_program:
+                        continue
+
+                    prog_count += 1
                     data_pt = {
                         'source_code': prog,
                         'io_examples': io_examples
