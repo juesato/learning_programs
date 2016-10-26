@@ -1,45 +1,27 @@
 import os
 import random
 import json
+import subprocess
+import pickle
 
 
-class ProgramEnv:
-
-    """
-    Defines which variables in the current Python scope we care about
-    var_names: a list of strings
-    """
-
-    def __init__(self, var_names):
-        self.var_names = var_names
-
-    def get_state(self):
-        state = {}
-        all_vars = vars()
-        for v in self.var_names:
-            # Look at global value
-            global t
-            exec('global ' + v)
-            print ("MAKE", 'global ' + v)
-            print "HELP", all_vars
-            print "V", v
-            if v in all_vars:
-                state[v] = all_vars[v]
-        return state
-
-    def clear_state(self):
-        for v in self.var_names:
-            del v
-
-    def set_state(self, inp):
-        assert(type(inp) == type({}),
-               'set_state takes a dict of variable names and values as input')
-        for k in inp:
-            v = inp[k]
-            # TODO: Is this the best way to do this
-            setter = 'global ' + k + ';' + k + '=' + str(v)
-            print "INIT", setter
-            exec(setter)
+def get_postcondition(prog_str, precondition):
+    python_file = ''
+    for k, v in precondition.iteritems():
+        python_file += '{0}={1};'.format(k, str(v))
+    python_file += '\n'
+    python_file += prog_str
+    python_file += """
+all_vars = vars().copy()
+state={};
+for k in all_vars:
+    if not k.startswith('_'):
+        state[k] = all_vars[k]
+import pickle; print pickle.dumps(state);
+"""
+    cmd = 'printf "{0}" | python'.format(python_file)
+    state_as_str = subprocess.check_output(cmd, shell=True)
+    return pickle.loads(state_as_str)
 
 
 class ProgramSampler:
@@ -58,7 +40,6 @@ class ProgramSampler:
 
     def __init__(self, symbols):
         self.symbols = symbols
-        self.program_env = ProgramEnv(symbols)
 
     def sample_program(self, prog_len, start_symbols):
         """
@@ -93,12 +74,8 @@ class ProgramSampler:
 
     def sample_io(self, start_symbols, prog_str):
         precondition = self._sample_inputs(start_symbols)
-        self.program_env.clear_state()
-        self.program_env.set_state(precondition)
-        print("PROGR", prog_str)
-        print("PRECO", precondition)
-        exec(prog_str)
-        postcondition = self.program_env.get_state()
+        postcondition = get_postcondition(prog_str, precondition)
+        print postcondition
         return {'precondition': precondition,
                 'postcondition': postcondition}
 
@@ -108,7 +85,8 @@ class DatasetWriter:
     def __init__(self, prog_sampler):
         self.prog_sampler = prog_sampler
 
-    def create_dataset(self, data_dir, mx_len, num_progs, num_samples_per_prog):
+    def create_dataset(self, data_dir, mx_len, num_progs,
+                       num_samples_per_prog):
         for i in xrange(1, mx_len+1):
             file_path = os.path.join(data_dir, 'len' + str(i) + '.json')
             with open(file_path, 'w') as out_file:
@@ -121,8 +99,9 @@ class DatasetWriter:
                         try:
                             sample_io = self.prog_sampler.sample_io(
                                 start_symbols, prog)
-                        except Exception:
+                        except Exception as e:
                             # Probably hit an error due to divide by 0
+                            print e
                             continue
                         io_examples.append(sample_io)
 
@@ -131,7 +110,9 @@ class DatasetWriter:
                         'io_examples': io_examples
                     }
                     out_file.write(
-                        json.dumps(data_pt, indent=4, separators=(',', ': ')))
+                        json.dumps(data_pt, indent=4,
+                                   separators=(',', ': '),
+                                   sort_keys=True))
                     out_file.write(',\n')
                 out_file.write(']')
 
