@@ -6,23 +6,60 @@ import pickle
 import copy
 
 
-def get_postcondition(prog_str, precondition):
-    python_file = ''
-    for k, v in precondition.iteritems():
-        python_file += '{0}={1};'.format(k, str(v))
-    python_file += '\n'
-    python_file += prog_str
+def get_postconditions(prog_str, preconditions):
+    # Note that each call to subprocess has ~10ms overhead, so 1m calls costs 3 hours
+    # To lessen this cost, we batch the calls per program, which is a 100x improvement
+    temp_file = '/home/juesato/code/temp.py'
+
+    python_file = 'import pickle as _pickle; import sys as _sys;\n'
+    preconditions_str = pickle.dumps(preconditions)
+    # TODO: Precondition pickle should be passed as argument
+    python_file += '_precond_str = """{0}""";\n'.format(preconditions_str)
+    python_file += '_preconds = _pickle.loads(_precond_str);\n'
     python_file += """
-all_vars = vars().copy()
-state={};
-for k in all_vars:
-    if not k.startswith('_'):
-        state[k] = all_vars[k]
-import pickle; print pickle.dumps(state);
-"""
-    cmd = 'printf "{0}" | python'.format(python_file)
-    state_as_str = subprocess.check_output(cmd, shell=True)
-    return pickle.loads(state_as_str)
+_postconds = []
+for _precond in _preconds:
+    try:
+        _init_str = ''
+        for _k, _v in _precond.iteritems():
+            _init_str += _k + '=' + str(_v) + ';'
+        exec(_init_str)
+        {0}
+        _all_vars = vars().copy()
+        _state={{}};
+        for _k in _all_vars:
+            if not _k.startswith('_'):
+                _state[_k] = _all_vars[_k]
+                del _k
+    except Exception as _e:
+        _postconds.append(None)
+        continue
+    _postconds.append(_state)
+print _pickle.dumps(_postconds)
+
+""".format(prog_str)
+    # for precondition in preconditions:
+    #     init_lines = ''
+    #     for k, v in precondition.iteritems():
+    #         init_lines += '{0}={1};\n'.format(k, str(v))
+    #     python_file += init_lines
+    #     python_file += prog_str
+    #     python_file += print_state_and_clear
+
+
+    # cmd = 'printf "{0}" | python'.format(python_file)
+    with open(temp_file, 'w') as f:
+        f.write(python_file)
+    cmd = 'python {0}'.format(temp_file)
+    states_as_str = subprocess.check_output(cmd, shell=True)
+    # print states_as_str
+    # print "MADE IT"
+    try:
+        return pickle.loads(states_as_str)
+    except Exception as e:
+        with open('/home/juesato/code.txt', 'w') as f:
+         f.write(states_as_str)
+         print "ERROR"
 
 
 class ProgramSampler:
@@ -63,7 +100,7 @@ class ProgramSampler:
             prog += line_str
         return prog
 
-    def _sample_inputs(self, start_symbols):
+    def sample_inputs(self, start_symbols):
         """
         Sample inputs as random integers from start_symbols
         """
@@ -77,11 +114,12 @@ class ProgramSampler:
         precondition = self._sample_inputs(start_symbols)
         state = copy.deepcopy(precondition)
         postcondition = get_postcondition(prog_str, state)
-        return {'precondition': precondition,
-                'postcondition': postcondition}
+        return {'pre': precondition,
+                'post': postcondition}
 
 
 class DatasetWriter:
+    PROG_INTERVAL = 100
 
     def __init__(self, prog_sampler):
         self.prog_sampler = prog_sampler
@@ -90,38 +128,48 @@ class DatasetWriter:
                        num_samples_per_prog):
         for i in xrange(1, mx_len+1):
             file_path = os.path.join(data_dir, 'len' + str(i) + '.json')
+            print "Writing to {0}".format(file_path)
             with open(file_path, 'w') as out_file:
                 out_file.write('[\n')
                 prog_count = 0
                 while prog_count < num_progs:
+                    if not prog_count % DatasetWriter.PROG_INTERVAL:
+                        print "PROG COUNT", prog_count
                     start_symbols = self._sample_start_symbols()
                     prog = self.prog_sampler.sample_program(
                         i, copy.deepcopy(start_symbols))
-                    io_examples = []
-                    io_generation_count = 0
-                    # Some programs often have / by 0 errors
-                    bad_program = False
-                    while len(io_examples) < num_samples_per_prog:
-                        io_generation_count += 1
-                        if io_generation_count > num_samples_per_prog * 2:
-                            bad_program = True
-                            break
-                        try:
-                            sample_io = self.prog_sampler.sample_io(
-                                start_symbols, prog)
-                        except Exception as e:
-                            # Probably hit an error due to divide by 0
-                            # print e
-                            continue
-                        io_examples.append(sample_io)
 
-                    if bad_program:
-                        continue
+                    in_examples = []
+                    for j in xrange(num_samples_per_prog * 2):
+                        in_examples.append(self.prog_sampler.sample_inputs(start_symbols))
+                    out_examples = get_postconditions(prog, in_examples)
+
+                    # io_examples = []
+                    # num_attempts = 0
+                    # # Some programs often have / by 0 errors
+                    # bad_program = False
+                    # while len(io_examples) < num_samples_per_prog:
+                    #     num_attempts += 1
+                    #     if num_attempts > num_samples_per_prog * 2:
+                    #         bad_program = True
+                    #         break
+                    #     try:
+                    #         sample_io = self.prog_sampler.sample_io(
+                    #             start_symbols, prog)
+                    #     except Exception as e:
+                    #         # Probably hit an error due to divide by 0
+                    #         # print e
+                    #         continue
+                    #     io_examples.append(sample_io)
+
+                    # if bad_program:
+                    #     continue
 
                     prog_count += 1
                     data_pt = {
                         'source_code': prog,
-                        'io_examples': io_examples
+                        # 'io_examples': io_examples
+                        'io_examples': zip(in_examples, out_examples)
                     }
                     out_file.write(
                         json.dumps(data_pt, indent=4,
